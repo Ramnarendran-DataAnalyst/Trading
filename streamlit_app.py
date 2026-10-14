@@ -49,7 +49,7 @@ if not calculate:
 
 try:
     _, result = calculate_window(rows, float(base_strike))
-    _, markings = calculate_color_markings(rows, float(pre_open_price))
+    _, markings = calculate_color_markings(rows, float(pre_open_price), float(base_strike))
 except ValueError as error:
     st.error(str(error))
     st.stop()
