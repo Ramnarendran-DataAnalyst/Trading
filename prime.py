@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Create a NIFTY CE/PE settlement-price window from an NSE option CSV.
 
-The script finds the latest Date in the CSV automatically.  For the entered
+The script finds the latest Date in the CSV automatically. For the entered
 base strike it uses the four listed strikes above and below it, then prints
 CE, PE, CE + PE, and their average for every strike in that nine-strike window.
+
+When a pre-open price is supplied, it also produces the Green, Orange, Blue,
+and Black groups shown in the reference table.
 """
 
 from __future__ import annotations
@@ -58,7 +61,8 @@ def read_rows(csv_path: Path) -> list[dict[str, str]]:
         return list(reader)
 
 
-def calculate_window(rows: list[dict[str, str]], base_strike: float):
+def latest_option_data(rows: list[dict[str, str]]):
+    """Return latest-date settlement prices keyed by (strike, CE/PE)."""
     dates = [to_date(row["Date"]) for row in rows]
     valid_dates = [item for item in dates if item is not None]
     if not valid_dates:
@@ -80,7 +84,13 @@ def calculate_window(rows: list[dict[str, str]], base_strike: float):
             prices[(strike, option_type)] = settlement
 
     ordered_strikes = sorted(strikes)
-    if base_strike not in strikes:
+    return latest_date, prices, ordered_strikes
+
+
+def calculate_window(rows: list[dict[str, str]], base_strike: float):
+    """Calculate the CE/PE total and average for the nine-strike window."""
+    latest_date, prices, ordered_strikes = latest_option_data(rows)
+    if base_strike not in ordered_strikes:
         nearest = sorted(ordered_strikes, key=lambda strike: abs(strike - base_strike))[:5]
         nearby = ", ".join(display(strike) for strike in sorted(nearest))
         raise ValueError(
@@ -103,6 +113,59 @@ def calculate_window(rows: list[dict[str, str]], base_strike: float):
     return latest_date, result
 
 
+def calculate_color_markings(rows: list[dict[str, str]], pre_open_price: float):
+    """Return the screenshot-style Green, Orange, Blue, and Black groups.
+
+    Rule inferred from the supplied example:
+    - Green: CE at the strike at/below pre-open and PE at the next strike above.
+    - Orange: the CE+PE average (prime value) at each Green strike.
+    - Black: CE and PE at one strike above the Green PE strike.
+    - Blue: CE values at the Green PE strike and the next two lower strikes,
+      plus PE values at the second and third strikes above the Green PE strike.
+
+    Returned entries retain their strike and option side so each displayed value
+    can be traced back to the source data.
+    """
+    latest_date, prices, ordered_strikes = latest_option_data(rows)
+    ce_candidates = [strike for strike in ordered_strikes if strike <= pre_open_price and (strike, "CE") in prices]
+    pe_candidates = [strike for strike in ordered_strikes if strike > pre_open_price and (strike, "PE") in prices]
+    if not ce_candidates or not pe_candidates:
+        raise ValueError("Could not find both pre-open ITM strikes in the latest-date data.")
+
+    ce_strike = max(ce_candidates)
+    pe_strike = min(pe_candidates)
+    pe_index = ordered_strikes.index(pe_strike)
+
+    def item(strike: float, option_type: str):
+        value = prices.get((strike, option_type))
+        if value is None:
+            return None
+        return {"strike": strike, "option_type": option_type, "value": value}
+
+    def prime_value(strike: float):
+        ce = prices.get((strike, "CE"))
+        pe = prices.get((strike, "PE"))
+        if ce is None or pe is None:
+            return None
+        return {"strike": strike, "value": (ce + pe) / 2}
+
+    def valid_items(indexes, option_type):
+        return [entry for index in indexes if 0 <= index < len(ordered_strikes)
+                if (entry := item(ordered_strikes[index], option_type)) is not None]
+
+    black_index = pe_index + 1
+    return latest_date, {
+        "itm_strikes": {"ce": ce_strike, "pe": pe_strike},
+        "green": [item(pe_strike, "PE"), item(ce_strike, "CE")],
+        "orange": [prime_value(pe_strike), prime_value(ce_strike)],
+        "blue": {
+            "ce": valid_items((pe_index, pe_index - 1, pe_index - 2), "CE"),
+            "pe": valid_items((pe_index + 2, pe_index + 3), "PE"),
+        },
+        "black": valid_items((black_index,), "CE") + valid_items((black_index,), "PE"),
+    }
+
+
 def print_table(latest_date, base_strike: float, result) -> None:
     print(f"Latest data date used: {latest_date:%d-%b-%Y}")
     print(f"ATM strike base: {display(base_strike)}\n")
@@ -116,10 +179,28 @@ def print_table(latest_date, base_strike: float, result) -> None:
         )
 
 
+def print_color_markings(latest_date, markings) -> None:
+    """Print the screenshot-style color classifications with source strikes."""
+    itm = markings["itm_strikes"]
+    print(f"\nColor markings for latest date: {latest_date:%d-%b-%Y}")
+    print(f"ITM strikes (pre-open): {display(itm['ce'])} CE, {display(itm['pe'])} PE")
+    for color in ("green", "orange", "black"):
+        values = markings[color]
+        label = ", ".join(
+            f"{display(entry['value'])} ({display(entry['strike'])} {entry.get('option_type', 'Prime')})"
+            for entry in values if entry is not None
+        )
+        print(f"{color.title()}: {label}")
+    for side, values in markings["blue"].items():
+        label = ", ".join(f"{display(entry['value'])} ({display(entry['strike'])} {side.upper()})" for entry in values)
+        print(f"Blue {side.upper()}: {label}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("strike", nargs="?", type=float, help="Base/ATM strike, for example 22700")
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV, help="Path to the NSE CSV file")
+    parser.add_argument("--pre-open", type=float, help="Pre-open NIFTY price for Green/Orange/Blue/Black groups")
     args = parser.parse_args()
 
     try:
@@ -128,8 +209,12 @@ def main() -> int:
             base_strike = to_number(input("Enter base strike: "))
         if base_strike is None:
             raise ValueError("Enter a valid numeric strike.")
-        latest_date, result = calculate_window(read_rows(args.csv), base_strike)
+        rows = read_rows(args.csv)
+        latest_date, result = calculate_window(rows, base_strike)
         print_table(latest_date, base_strike, result)
+        if args.pre_open is not None:
+            color_date, markings = calculate_color_markings(rows, args.pre_open)
+            print_color_markings(color_date, markings)
         return 0
     except (OSError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
