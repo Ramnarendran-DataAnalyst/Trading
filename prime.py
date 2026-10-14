@@ -122,20 +122,36 @@ def calculate_window(rows: list[dict[str, str]], base_strike: float):
     return latest_date, result
 
 
-def calculate_color_markings(rows: list[dict[str, str]], pre_open_price: float):
+def calculate_color_markings(
+    rows: list[dict[str, str]], pre_open_price: float, base_strike: float | None = None
+):
     """Return the screenshot-style Green, Orange, Blue, and Black groups.
 
-    Rule inferred from the supplied example:
+    Rule supplied for the color groups:
     - Green: CE at the strike at/below pre-open and PE at the next strike above.
     - Orange: the CE+PE average (prime value) at each Green strike.
-    - Black: CE and PE at one strike above the Green PE strike.
-    - Blue: CE values at the Green PE strike and the next two lower strikes,
-      plus PE values at the second and third strikes above the Green PE strike.
+    - Blue CE: up to three CE values immediately greater than the Green PE value.
+    - Blue PE: up to three PE values immediately greater than the Green CE value.
+    - Black CE: the closest CE value lower than the Green PE value.
+    - Black PE: the closest PE value lower than the Green CE value.
 
     Returned entries retain their strike and option side so each displayed value
     can be traced back to the source data.
     """
     latest_date, prices, ordered_strikes = latest_option_data(rows)
+    if base_strike is not None:
+        if base_strike not in ordered_strikes:
+            raise ValueError(f"Base strike {display(base_strike)} is unavailable in the latest-date data.")
+        base_index = ordered_strikes.index(base_strike)
+        displayed_strikes = set(ordered_strikes[max(0, base_index - 4): base_index + 5])
+        if len(displayed_strikes) != 9:
+            raise ValueError("There are not four available strikes on both sides of the chosen strike.")
+        prices = {
+            (strike, option_type): value
+            for (strike, option_type), value in prices.items()
+            if strike in displayed_strikes
+        }
+        ordered_strikes = sorted(displayed_strikes)
     ce_candidates = [strike for strike in ordered_strikes if strike <= pre_open_price and (strike, "CE") in prices]
     pe_candidates = [strike for strike in ordered_strikes if strike > pre_open_price and (strike, "PE") in prices]
     if not ce_candidates or not pe_candidates:
@@ -143,8 +159,6 @@ def calculate_color_markings(rows: list[dict[str, str]], pre_open_price: float):
 
     ce_strike = max(ce_candidates)
     pe_strike = min(pe_candidates)
-    pe_index = ordered_strikes.index(pe_strike)
-
     def item(strike: float, option_type: str):
         value = prices.get((strike, option_type))
         if value is None:
@@ -158,20 +172,42 @@ def calculate_color_markings(rows: list[dict[str, str]], pre_open_price: float):
             return None
         return {"strike": strike, "value": (ce + pe) / 2}
 
-    def valid_items(indexes, option_type):
-        return [entry for index in indexes if 0 <= index < len(ordered_strikes)
-                if (entry := item(ordered_strikes[index], option_type)) is not None]
+    green_ce_value = prices[(ce_strike, "CE")]
+    green_pe_value = prices[(pe_strike, "PE")]
 
-    black_index = pe_index + 1
+    def values_for(option_type: str):
+        return [
+            {"strike": strike, "option_type": option_type, "value": value}
+            for (strike, side), value in prices.items()
+            if side == option_type
+        ]
+
+    def nearest_higher(option_type: str, threshold: float, limit: int = 3):
+        """Return the smallest option prices strictly above a threshold."""
+        return sorted(
+            (entry for entry in values_for(option_type) if entry["value"] > threshold),
+            key=lambda entry: (entry["value"], entry["strike"]),
+        )[:limit]
+
+    def nearest_lower(option_type: str, threshold: float):
+        """Return the option price immediately below a threshold."""
+        candidates = [entry for entry in values_for(option_type) if entry["value"] < threshold]
+        return max(candidates, key=lambda entry: (entry["value"], entry["strike"])) if candidates else None
+
     return latest_date, {
         "itm_strikes": {"ce": ce_strike, "pe": pe_strike},
         "green": [item(pe_strike, "PE"), item(ce_strike, "CE")],
         "orange": [prime_value(pe_strike), prime_value(ce_strike)],
         "blue": {
-            "ce": valid_items((pe_index, pe_index - 1, pe_index - 2), "CE"),
-            "pe": valid_items((pe_index + 2, pe_index + 3), "PE"),
+            "ce": nearest_higher("CE", green_pe_value),
+            "pe": nearest_higher("PE", green_ce_value),
         },
-        "black": valid_items((black_index,), "CE") + valid_items((black_index,), "PE"),
+        "black": [
+            entry for entry in (
+                nearest_lower("CE", green_pe_value),
+                nearest_lower("PE", green_ce_value),
+            ) if entry is not None
+        ],
     }
 
 
@@ -222,7 +258,7 @@ def main() -> int:
         latest_date, result = calculate_window(rows, base_strike)
         print_table(latest_date, base_strike, result)
         if args.pre_open is not None:
-            color_date, markings = calculate_color_markings(rows, args.pre_open)
+            color_date, markings = calculate_color_markings(rows, args.pre_open, base_strike)
             print_color_markings(color_date, markings)
         return 0
     except (OSError, ValueError) as error:
