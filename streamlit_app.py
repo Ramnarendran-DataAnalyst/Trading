@@ -95,7 +95,7 @@ st.caption(
 )
 st.dataframe(table, hide_index=True, use_container_width=True)
 
-st.subheader("Color summary")
+st.subheader("Levels for indicator (copy into TradingView)")
 
 
 def summary_line(green_value, orange_value, black_value, blue_values):
@@ -109,16 +109,21 @@ def summary_line(green_value, orange_value, black_value, blue_values):
     )
 
 
-# First block is for the Green CE row; second block is for the Green PE row.
+# Separate blocks make each option's levels easy to copy into TradingView.
+st.caption(f"{display(itm['ce'])} CE")
 st.code(
     summary_line(
         green.get(itm["ce"]),
         orange.get(itm["ce"]),
         black.get("PE"),
         markings["blue"]["pe"],
-    )
-    + "\n\n"
-    + summary_line(
+    ),
+    language=None,
+)
+
+st.caption(f"{display(itm['pe'])} PE")
+st.code(
+    summary_line(
         green.get(itm["pe"]),
         orange.get(itm["pe"]),
         black.get("CE"),
