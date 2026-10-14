@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 
@@ -45,9 +46,15 @@ def to_date(value: str):
 
 
 def display(value: float | None) -> str:
+    """Format outputs as whole numbers with conventional half-up rounding."""
     if value is None:
         return "—"
-    return str(int(value)) if value.is_integer() else f"{value:.2f}".rstrip("0").rstrip(".")
+    return str(int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)))
+
+
+def is_hundred_strike(strike: float) -> bool:
+    """Keep 100-point strikes such as 22600 and 22700 only."""
+    return abs(strike - round(strike / 100) * 100) < 0.001
 
 
 def read_rows(csv_path: Path) -> list[dict[str, str]]:
@@ -78,6 +85,8 @@ def latest_option_data(rows: list[dict[str, str]]):
         settlement = to_number(row["Settlement Price"])
         option_type = row["Option Type"].strip().upper()
         if strike is None:
+            continue
+        if not is_hundred_strike(strike):
             continue
         strikes.add(strike)
         if option_type in {"CE", "PE"} and settlement is not None:
